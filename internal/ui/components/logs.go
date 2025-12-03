@@ -3,27 +3,59 @@ package components
 import (
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/doganarif/k9sight/internal/k8s"
 	"github.com/doganarif/k9sight/internal/ui/styles"
 )
 
+type TimeFilter int
+
+const (
+	TimeFilterAll TimeFilter = iota
+	TimeFilter5Min
+	TimeFilter15Min
+	TimeFilter1Hour
+	TimeFilter6Hours
+)
+
+var timeFilterLabels = map[TimeFilter]string{
+	TimeFilterAll:    "All",
+	TimeFilter5Min:   "5m",
+	TimeFilter15Min:  "15m",
+	TimeFilter1Hour:  "1h",
+	TimeFilter6Hours: "6h",
+}
+
 type LogsPanel struct {
-	logs      []k8s.LogLine
-	viewport  viewport.Model
-	ready     bool
-	width     int
-	height    int
-	following bool
-	filter    string
-	container string
+	logs         []k8s.LogLine
+	viewport     viewport.Model
+	ready        bool
+	width        int
+	height       int
+	following    bool
+	filter       string
+	containers   []string // list of container names
+	containerIdx int      // -1 = all, 0+ = specific container
+	showPrevious bool     // show previous container logs
+	searching    bool     // true when search input is active
+	searchInput  textinput.Model
+	timeFilter   TimeFilter
 }
 
 func NewLogsPanel() LogsPanel {
+	ti := textinput.New()
+	ti.Placeholder = "Search logs..."
+	ti.CharLimit = 100
+	ti.Width = 30
+
 	return LogsPanel{
-		following: true,
+		following:    true,
+		containerIdx: -1, // -1 means all containers
+		searchInput:  ti,
 	}
 }
 
@@ -36,8 +68,41 @@ func (l LogsPanel) Update(msg tea.Msg) (LogsPanel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Handle search mode
+		if l.searching {
+			switch msg.String() {
+			case "esc":
+				l.searching = false
+				l.searchInput.Blur()
+				return l, nil
+			case "enter":
+				l.searching = false
+				l.searchInput.Blur()
+				l.filter = l.searchInput.Value()
+				l.updateContent()
+				return l, nil
+			default:
+				l.searchInput, cmd = l.searchInput.Update(msg)
+				// Live search as you type
+				l.filter = l.searchInput.Value()
+				l.updateContent()
+				return l, cmd
+			}
+		}
+
+		// Normal mode
 		switch msg.String() {
-		case "F":
+		case "/":
+			l.searching = true
+			l.searchInput.Focus()
+			return l, textinput.Blink
+		case "c":
+			// Clear filter
+			l.filter = ""
+			l.searchInput.SetValue("")
+			l.updateContent()
+			return l, nil
+		case "f":
 			l.following = !l.following
 			if l.following {
 				l.viewport.GotoBottom()
@@ -48,6 +113,17 @@ func (l LogsPanel) Update(msg tea.Msg) (LogsPanel, tea.Cmd) {
 			l.viewport.GotoTop()
 		case "G":
 			l.viewport.GotoBottom()
+		case "[":
+			l.prevContainer()
+		case "]":
+			l.nextContainer()
+		case "P":
+			l.showPrevious = !l.showPrevious
+			// Note: actual previous logs fetch handled by dashboard
+		case "T":
+			l.cycleTimeFilter()
+			l.updateContent()
+			return l, nil
 		}
 	}
 
@@ -62,13 +138,47 @@ func (l LogsPanel) View() string {
 
 	var header strings.Builder
 	header.WriteString(styles.PanelTitleStyle.Render("Logs"))
-	if l.container != "" {
-		header.WriteString(styles.SubtitleStyle.Render(fmt.Sprintf(" [%s]", l.container)))
+
+	// Show container indicator
+	if len(l.containers) > 0 {
+		containerName := "all"
+		if l.containerIdx >= 0 && l.containerIdx < len(l.containers) {
+			containerName = l.containers[l.containerIdx]
+		}
+		header.WriteString(styles.SubtitleStyle.Render(fmt.Sprintf(" [%s]", containerName)))
+
+		// Show navigation hint if multiple containers
+		if len(l.containers) > 1 {
+			header.WriteString(styles.HelpDescStyle.Render(fmt.Sprintf(" (%d/%d)", l.containerIdx+2, len(l.containers)+1)))
+		}
 	}
-	if l.following {
+
+	if l.showPrevious {
+		header.WriteString(styles.EventWarning.Render(" [Previous]"))
+	}
+	if l.following && !l.showPrevious {
 		header.WriteString(styles.StatusRunning.Render(" [Following]"))
 	}
+
+	// Show time filter indicator
+	if l.timeFilter != TimeFilterAll {
+		header.WriteString(styles.HelpKeyStyle.Render(fmt.Sprintf(" [%s]", timeFilterLabels[l.timeFilter])))
+	}
+
+	// Show filter indicator
+	if l.filter != "" && !l.searching {
+		header.WriteString(styles.HelpKeyStyle.Render(fmt.Sprintf(" /%s", l.filter)))
+		header.WriteString(styles.HelpDescStyle.Render(" (c:clear)"))
+	}
+
 	header.WriteString("\n")
+
+	// Show search input if searching
+	if l.searching {
+		header.WriteString(styles.HelpKeyStyle.Render("/"))
+		header.WriteString(l.searchInput.View())
+		header.WriteString("\n")
+	}
 
 	return header.String() + l.viewport.View()
 }
@@ -93,8 +203,63 @@ func (l *LogsPanel) SetSize(width, height int) {
 	l.updateContent()
 }
 
-func (l *LogsPanel) SetContainer(container string) {
-	l.container = container
+func (l *LogsPanel) SetContainers(containers []string) {
+	l.containers = containers
+	l.containerIdx = -1 // reset to "all" when containers change
+}
+
+func (l *LogsPanel) nextContainer() {
+	if len(l.containers) == 0 {
+		return
+	}
+	// Cycle: -1 (all) -> 0 -> 1 -> ... -> len-1 -> -1
+	l.containerIdx++
+	if l.containerIdx >= len(l.containers) {
+		l.containerIdx = -1
+	}
+	l.updateContent()
+}
+
+func (l *LogsPanel) prevContainer() {
+	if len(l.containers) == 0 {
+		return
+	}
+	// Cycle: -1 (all) <- 0 <- 1 <- ... <- len-1 <- -1
+	l.containerIdx--
+	if l.containerIdx < -1 {
+		l.containerIdx = len(l.containers) - 1
+	}
+	l.updateContent()
+}
+
+func (l LogsPanel) SelectedContainer() string {
+	if l.containerIdx >= 0 && l.containerIdx < len(l.containers) {
+		return l.containers[l.containerIdx]
+	}
+	return "" // empty means all
+}
+
+func (l LogsPanel) ShowPrevious() bool {
+	return l.showPrevious
+}
+
+func (l *LogsPanel) cycleTimeFilter() {
+	l.timeFilter = (l.timeFilter + 1) % 5
+}
+
+func (l LogsPanel) getTimeFilterDuration() time.Duration {
+	switch l.timeFilter {
+	case TimeFilter5Min:
+		return 5 * time.Minute
+	case TimeFilter15Min:
+		return 15 * time.Minute
+	case TimeFilter1Hour:
+		return time.Hour
+	case TimeFilter6Hours:
+		return 6 * time.Hour
+	default:
+		return 0 // No time filter
+	}
 }
 
 func (l *LogsPanel) SetFilter(filter string) {
@@ -131,17 +296,43 @@ func (l *LogsPanel) updateContent() {
 }
 
 func (l LogsPanel) getFilteredLogs() []k8s.LogLine {
-	if l.filter == "" {
-		return l.logs
+	var filtered []k8s.LogLine
+	now := time.Now()
+	timeDuration := l.getTimeFilterDuration()
+
+	// First filter by container if specific container selected
+	selectedContainer := l.SelectedContainer()
+	for _, log := range l.logs {
+		if selectedContainer != "" && log.Container != selectedContainer {
+			continue
+		}
+		filtered = append(filtered, log)
 	}
 
-	filter := strings.ToLower(l.filter)
-	var filtered []k8s.LogLine
-	for _, log := range l.logs {
-		if strings.Contains(strings.ToLower(log.Content), filter) {
-			filtered = append(filtered, log)
+	// Then filter by time if set
+	if timeDuration > 0 {
+		cutoff := now.Add(-timeDuration)
+		var timeFiltered []k8s.LogLine
+		for _, log := range filtered {
+			if !log.Timestamp.IsZero() && log.Timestamp.After(cutoff) {
+				timeFiltered = append(timeFiltered, log)
+			}
 		}
+		filtered = timeFiltered
 	}
+
+	// Then filter by text filter if set
+	if l.filter != "" {
+		filter := strings.ToLower(l.filter)
+		var textFiltered []k8s.LogLine
+		for _, log := range filtered {
+			if strings.Contains(strings.ToLower(log.Content), filter) {
+				textFiltered = append(textFiltered, log)
+			}
+		}
+		filtered = textFiltered
+	}
+
 	return filtered
 }
 
@@ -154,7 +345,8 @@ func (l LogsPanel) formatLogLine(log k8s.LogLine) string {
 		b.WriteString(" ")
 	}
 
-	if log.Container != "" && l.container == "" {
+	// Show container name when viewing all containers
+	if log.Container != "" && l.containerIdx == -1 && len(l.containers) > 1 {
 		b.WriteString(styles.LogContainer.Render(fmt.Sprintf("[%s]", log.Container)))
 		b.WriteString(" ")
 	}
@@ -208,4 +400,12 @@ func (l LogsPanel) ErrorCount() int {
 		}
 	}
 	return count
+}
+
+func (l LogsPanel) IsSearching() bool {
+	return l.searching
+}
+
+func (l LogsPanel) Filter() string {
+	return l.filter
 }

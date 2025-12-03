@@ -8,11 +8,12 @@ A fast, keyboard-driven TUI for debugging Kubernetes workloads.
 ## Features
 
 - Browse deployments, statefulsets, daemonsets, jobs, cronjobs
-- View pod logs with error highlighting
+- View pod logs with search, time filtering, and container selection
+- Execute into pods, port-forward, and describe directly from TUI
+- Scale and restart workloads
 - Monitor events and resource metrics
 - Debug helpers for common issues (CrashLoopBackOff, ImagePullBackOff, etc.)
 - Vim-style navigation
-- Live filtering
 
 ## Install
 
@@ -36,18 +37,46 @@ k9sight
 
 ### Key Bindings
 
+**Navigation**
 | Key | Action |
 |-----|--------|
-| `j/k` or `↑/↓` | Navigate |
+| `j/k` | Navigate up/down |
 | `enter` | Select |
-| `esc` | Back |
-| `/` | Filter |
+| `esc` | Back / Close |
+| `/` | Search/Filter |
 | `n` | Change namespace |
 | `t` | Change resource type |
-| `1-4` | Focus panel |
-| `v` | Fullscreen panel |
 | `?` | Help |
 | `q` | Quit |
+
+**Workload Actions**
+| Key | Action |
+|-----|--------|
+| `s` | Scale deployment/statefulset |
+| `R` | Restart workload |
+
+**Pod Actions** (in pod view)
+| Key | Action |
+|-----|--------|
+| `a` | Actions menu (exec, port-forward, describe, delete) |
+| `y` | Copy kubectl commands |
+
+**Logs Panel**
+| Key | Action |
+|-----|--------|
+| `/` | Search logs |
+| `[` `]` | Cycle containers |
+| `P` | Previous container logs |
+| `T` | Time filter (5m/15m/1h/6h) |
+| `f` | Toggle follow |
+| `e` | Jump to next error |
+
+**Panels**
+| Key | Action |
+|-----|--------|
+| `1-4` | Focus panel (logs/events/metrics/manifest) |
+| `tab` | Next panel |
+| `v` | Fullscreen toggle |
 
 ## Requirements
 
@@ -56,4 +85,4 @@ k9sight
 
 ## License
 
-MIT - see [LICENSE](LICENSE)
+MIT

@@ -44,6 +44,14 @@ type KeyMap struct {
 
 	// Manifest actions
 	ToggleFullView key.Binding
+
+	// Pod actions
+	CopyCommands key.Binding
+	PodActions   key.Binding
+
+	// Workload actions
+	Scale   key.Binding
+	Restart key.Binding
 }
 
 func DefaultKeyMap() KeyMap {
@@ -164,14 +172,34 @@ func DefaultKeyMap() KeyMap {
 
 		// Event actions
 		ToggleAllEvents: key.NewBinding(
-			key.WithKeys("a"),
-			key.WithHelp("a", "all events"),
+			key.WithKeys("A"),
+			key.WithHelp("A", "all events"),
 		),
 
 		// Manifest actions
 		ToggleFullView: key.NewBinding(
 			key.WithKeys("v"),
 			key.WithHelp("v", "full view"),
+		),
+
+		// Pod actions
+		CopyCommands: key.NewBinding(
+			key.WithKeys("y"),
+			key.WithHelp("y", "copy kubectl"),
+		),
+		PodActions: key.NewBinding(
+			key.WithKeys("a"),
+			key.WithHelp("a", "pod actions"),
+		),
+
+		// Workload actions
+		Scale: key.NewBinding(
+			key.WithKeys("s"),
+			key.WithHelp("s", "scale"),
+		),
+		Restart: key.NewBinding(
+			key.WithKeys("R"),
+			key.WithHelp("R", "restart"),
 		),
 	}
 }

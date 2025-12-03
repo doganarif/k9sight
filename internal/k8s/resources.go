@@ -574,3 +574,72 @@ func GetDaemonSet(ctx context.Context, clientset *kubernetes.Clientset, namespac
 func GetJob(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (*batchv1.Job, error) {
 	return clientset.BatchV1().Jobs(namespace).Get(ctx, name, metav1.GetOptions{})
 }
+
+func DeletePod(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) error {
+	return clientset.CoreV1().Pods(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+}
+
+func ScaleDeployment(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string, replicas int32) error {
+	scale, err := clientset.AppsV1().Deployments(namespace).GetScale(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	scale.Spec.Replicas = replicas
+	_, err = clientset.AppsV1().Deployments(namespace).UpdateScale(ctx, name, scale, metav1.UpdateOptions{})
+	return err
+}
+
+func ScaleStatefulSet(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string, replicas int32) error {
+	scale, err := clientset.AppsV1().StatefulSets(namespace).GetScale(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	scale.Spec.Replicas = replicas
+	_, err = clientset.AppsV1().StatefulSets(namespace).UpdateScale(ctx, name, scale, metav1.UpdateOptions{})
+	return err
+}
+
+func RestartDeployment(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) error {
+	deploy, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	if deploy.Spec.Template.Annotations == nil {
+		deploy.Spec.Template.Annotations = make(map[string]string)
+	}
+	deploy.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = metav1.Now().Format("2006-01-02T15:04:05Z07:00")
+
+	_, err = clientset.AppsV1().Deployments(namespace).Update(ctx, deploy, metav1.UpdateOptions{})
+	return err
+}
+
+func RestartStatefulSet(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) error {
+	sts, err := clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	if sts.Spec.Template.Annotations == nil {
+		sts.Spec.Template.Annotations = make(map[string]string)
+	}
+	sts.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = metav1.Now().Format("2006-01-02T15:04:05Z07:00")
+
+	_, err = clientset.AppsV1().StatefulSets(namespace).Update(ctx, sts, metav1.UpdateOptions{})
+	return err
+}
+
+func RestartDaemonSet(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) error {
+	ds, err := clientset.AppsV1().DaemonSets(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	if ds.Spec.Template.Annotations == nil {
+		ds.Spec.Template.Annotations = make(map[string]string)
+	}
+	ds.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = metav1.Now().Format("2006-01-02T15:04:05Z07:00")
+
+	_, err = clientset.AppsV1().DaemonSets(namespace).Update(ctx, ds, metav1.UpdateOptions{})
+	return err
+}

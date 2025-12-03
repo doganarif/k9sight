@@ -10,6 +10,20 @@ import (
 	"github.com/doganarif/k9sight/internal/ui/styles"
 )
 
+type ManifestViewMode int
+
+const (
+	ManifestViewSummary ManifestViewMode = iota
+	ManifestViewDetails
+	ManifestViewResources
+)
+
+var manifestViewModeLabels = map[ManifestViewMode]string{
+	ManifestViewSummary:   "Summary",
+	ManifestViewDetails:   "Details",
+	ManifestViewResources: "Resources",
+}
+
 type ManifestPanel struct {
 	pod       *k8s.PodInfo
 	related   *k8s.RelatedResources
@@ -18,7 +32,7 @@ type ManifestPanel struct {
 	ready     bool
 	width     int
 	height    int
-	showFull  bool
+	viewMode  ManifestViewMode
 }
 
 func NewManifestPanel() ManifestPanel {
@@ -35,9 +49,10 @@ func (m ManifestPanel) Update(msg tea.Msg) (ManifestPanel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "f":
-			m.showFull = !m.showFull
+		case "d":
+			m.viewMode = (m.viewMode + 1) % 3
 			m.updateContent()
+			return m, nil
 		}
 	}
 
@@ -52,9 +67,8 @@ func (m ManifestPanel) View() string {
 
 	var header strings.Builder
 	header.WriteString(styles.PanelTitleStyle.Render("Pod Details"))
-	if m.showFull {
-		header.WriteString(styles.SubtitleStyle.Render(" (full view)"))
-	}
+	header.WriteString(styles.SubtitleStyle.Render(fmt.Sprintf(" [%s]", manifestViewModeLabels[m.viewMode])))
+	header.WriteString(styles.HelpDescStyle.Render(" (d:cycle)"))
 	header.WriteString("\n")
 
 	return header.String() + m.viewport.View()
@@ -97,26 +111,32 @@ func (m *ManifestPanel) updateContent() {
 
 	var content strings.Builder
 
-	content.WriteString(m.renderPodInfo())
+	switch m.viewMode {
+	case ManifestViewSummary:
+		// Summary: Basic pod info and debug hints
+		content.WriteString(m.renderPodInfo())
+		if len(m.helpers) > 0 {
+			content.WriteString("\n")
+			content.WriteString(m.renderHelpers())
+		}
 
-	if len(m.helpers) > 0 {
+	case ManifestViewDetails:
+		// Details: Pod info, containers, labels, conditions
+		content.WriteString(m.renderPodInfo())
 		content.WriteString("\n")
-		content.WriteString(m.renderHelpers())
-	}
-
-	content.WriteString("\n")
-	content.WriteString(m.renderContainers())
-
-	if m.related != nil {
-		content.WriteString("\n")
-		content.WriteString(m.renderRelated())
-	}
-
-	if m.showFull {
+		content.WriteString(m.renderContainers())
 		content.WriteString("\n")
 		content.WriteString(m.renderLabels())
 		content.WriteString("\n")
 		content.WriteString(m.renderConditions())
+
+	case ManifestViewResources:
+		// Resources: Container resources and related resources
+		content.WriteString(m.renderContainerResources())
+		if m.related != nil {
+			content.WriteString("\n")
+			content.WriteString(m.renderRelated())
+		}
 	}
 
 	m.viewport.SetContent(content.String())
@@ -253,6 +273,37 @@ func (m ManifestPanel) renderConditions() string {
 		b.WriteString(fmt.Sprintf("  %s: %s\n",
 			cond.Type,
 			status.Render(string(cond.Status))))
+	}
+
+	return b.String()
+}
+
+func (m ManifestPanel) renderContainerResources() string {
+	var b strings.Builder
+
+	b.WriteString(styles.SubtitleStyle.Render("Container Resources\n"))
+	for _, c := range m.pod.Containers {
+		b.WriteString(styles.LogContainer.Render(fmt.Sprintf("  %s\n", c.Name)))
+
+		// CPU
+		b.WriteString("    CPU:\n")
+		b.WriteString(fmt.Sprintf("      Request: %s\n", c.Resources.CPURequest))
+		b.WriteString(fmt.Sprintf("      Limit:   %s\n", c.Resources.CPULimit))
+
+		// Memory
+		b.WriteString("    Memory:\n")
+		b.WriteString(fmt.Sprintf("      Request: %s\n", c.Resources.MemoryRequest))
+		b.WriteString(fmt.Sprintf("      Limit:   %s\n", c.Resources.MemoryLimit))
+
+		// Ports
+		if len(c.Ports) > 0 {
+			ports := make([]string, len(c.Ports))
+			for i, p := range c.Ports {
+				ports[i] = fmt.Sprintf("%d", p)
+			}
+			b.WriteString(fmt.Sprintf("    Ports: %s\n", strings.Join(ports, ", ")))
+		}
+		b.WriteString("\n")
 	}
 
 	return b.String()

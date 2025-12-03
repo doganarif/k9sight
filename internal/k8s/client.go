@@ -93,3 +93,31 @@ func (c *Client) ListContexts() ([]string, string, error) {
 	}
 	return contexts, config.CurrentContext, nil
 }
+
+func (c *Client) DeletePod(ctx context.Context, namespace, name string) error {
+	return DeletePod(ctx, c.clientset, namespace, name)
+}
+
+func (c *Client) ScaleWorkload(ctx context.Context, namespace, name string, resourceType ResourceType, replicas int32) error {
+	switch resourceType {
+	case ResourceDeployments:
+		return ScaleDeployment(ctx, c.clientset, namespace, name, replicas)
+	case ResourceStatefulSets:
+		return ScaleStatefulSet(ctx, c.clientset, namespace, name, replicas)
+	default:
+		return nil // DaemonSets, Jobs, CronJobs cannot be scaled
+	}
+}
+
+func (c *Client) RestartWorkload(ctx context.Context, namespace, name string, resourceType ResourceType) error {
+	switch resourceType {
+	case ResourceDeployments:
+		return RestartDeployment(ctx, c.clientset, namespace, name)
+	case ResourceStatefulSets:
+		return RestartStatefulSet(ctx, c.clientset, namespace, name)
+	case ResourceDaemonSets:
+		return RestartDaemonSet(ctx, c.clientset, namespace, name)
+	default:
+		return nil // Jobs and CronJobs don't have restart concept
+	}
+}

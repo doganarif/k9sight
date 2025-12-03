@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -24,21 +25,28 @@ const (
 )
 
 type Model struct {
-	k8sClient  *k8s.Client
-	config     *config.Config
-	navigator  components.Navigator
-	dashboard  views.Dashboard
-	statusBar  components.StatusBar
-	help       components.HelpPanel
-	spinner    spinner.Model
-	view       ViewState
-	width      int
-	height     int
-	loading    bool
-	err        error
-	keys       keys.KeyMap
-	workload   *k8s.WorkloadInfo
-	pod        *k8s.PodInfo
+	k8sClient          *k8s.Client
+	config             *config.Config
+	navigator          components.Navigator
+	dashboard          views.Dashboard
+	statusBar          components.StatusBar
+	help               components.HelpPanel
+	spinner            spinner.Model
+	workloadActionMenu components.WorkloadActionMenu
+	confirmDialog      components.ConfirmDialog
+	view               ViewState
+	width              int
+	height             int
+	loading            bool
+	err                error
+	keys               keys.KeyMap
+	workload           *k8s.WorkloadInfo
+	pod                *k8s.PodInfo
+	statusMsg          string // Status message for navigator view
+
+	// State tracking for reactive log fetching
+	lastShowPrevious bool
+	lastLogContainer string
 }
 
 type loadedMsg struct {
@@ -58,6 +66,25 @@ type dashboardDataMsg struct {
 	metrics *k8s.PodMetrics
 	related *k8s.RelatedResources
 	helpers []k8s.DebugHelper
+}
+
+type logsUpdatedMsg struct {
+	logs []k8s.LogLine
+}
+
+type podDeletedMsg struct {
+	namespace string
+	podName   string
+	err       error
+}
+
+type workloadActionMsg struct {
+	action       string
+	workloadName string
+	namespace    string
+	resourceType k8s.ResourceType
+	replicas     int32
+	err          error
 }
 
 type tickMsg time.Time
@@ -80,15 +107,17 @@ func New() (*Model, error) {
 	s.Style = styles.SpinnerStyle
 
 	return &Model{
-		k8sClient: client,
-		config:    cfg,
-		navigator: components.NewNavigator(),
-		dashboard: views.NewDashboard(),
-		statusBar: components.NewStatusBar(),
-		help:      components.NewHelpPanel(),
-		spinner:   s,
-		view:      ViewNavigator,
-		loading:   true,
+		k8sClient:          client,
+		config:             cfg,
+		navigator:          components.NewNavigator(),
+		dashboard:          views.NewDashboard(),
+		statusBar:          components.NewStatusBar(),
+		help:               components.NewHelpPanel(),
+		spinner:            s,
+		workloadActionMenu: components.NewWorkloadActionMenu(),
+		confirmDialog:      components.NewConfirmDialog(),
+		view:               ViewNavigator,
+		loading:            true,
 		keys:      keys.DefaultKeyMap(),
 	}, nil
 }
@@ -147,6 +176,97 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dashboard.SetHelpers(msg.helpers)
 		return m, nil
 
+	case logsUpdatedMsg:
+		m.dashboard.SetLogs(msg.logs)
+		return m, nil
+
+	case views.DeletePodRequest:
+		return m, m.deletePod(msg.Namespace, msg.PodName)
+
+	case podDeletedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+		} else {
+			// Go back to navigator after deletion
+			m.view = ViewNavigator
+			m.pod = nil
+			if m.workload != nil {
+				return m, m.loadPods(m.workload)
+			}
+			return m, m.loadWorkloads()
+		}
+		return m, nil
+
+	case components.WorkloadActionMenuResult:
+		workload := m.navigator.SelectedWorkload()
+		if workload == nil {
+			return m, nil
+		}
+		switch msg.Item.Action {
+		case "scale":
+			m.loading = true
+			return m, m.scaleWorkload(workload, msg.Item.Replicas)
+		case "copy":
+			err := components.CopyToClipboard(msg.Item.Command)
+			if err == nil {
+				m.statusMsg = "Copied: " + msg.Item.Label
+			} else {
+				m.statusMsg = "Copy failed: " + err.Error()
+			}
+		}
+		return m, nil
+
+	case components.ConfirmResult:
+		// Handle workload restart at app level
+		if msg.Confirmed && msg.Action == "restart" {
+			if workload, ok := msg.Data.(*k8s.WorkloadInfo); ok {
+				m.loading = true
+				m.statusMsg = "Restarting..."
+				return m, m.restartWorkload(workload)
+			}
+		}
+		// Forward other confirm results (exec, port-forward, delete) to dashboard
+		if m.view == ViewDashboard {
+			var cmd tea.Cmd
+			m.dashboard, cmd = m.dashboard.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+
+	case views.ExecFinishedMsg:
+		// Forward exec finished to dashboard
+		if m.view == ViewDashboard {
+			var cmd tea.Cmd
+			m.dashboard, cmd = m.dashboard.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+
+	case views.DescribeOutputMsg:
+		// Forward describe output to dashboard
+		if m.view == ViewDashboard {
+			var cmd tea.Cmd
+			m.dashboard, cmd = m.dashboard.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+
+	case workloadActionMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.statusMsg = "Error: " + msg.err.Error()
+		} else {
+			switch msg.action {
+			case "scale":
+				m.statusMsg = fmt.Sprintf("Scaled %s to %d replicas", msg.workloadName, msg.replicas)
+			case "restart":
+				m.statusMsg = fmt.Sprintf("Restart initiated for %s", msg.workloadName)
+			}
+			// Refresh workloads list
+			return m, m.loadWorkloads()
+		}
+		return m, nil
+
 	case tickMsg:
 		if m.view == ViewDashboard && m.pod != nil {
 			return m, tea.Batch(
@@ -157,6 +277,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.tickCmd()
 
 	case tea.KeyMsg:
+		// Confirm dialog takes highest priority
+		if m.confirmDialog.IsVisible() {
+			m.confirmDialog, cmd = m.confirmDialog.Update(msg)
+			return m, cmd
+		}
+
+		// Workload action menu takes priority
+		if m.workloadActionMenu.IsVisible() {
+			m.workloadActionMenu, cmd = m.workloadActionMenu.Update(msg)
+			return m, cmd
+		}
+
 		// Help overlay takes priority
 		if m.help.IsVisible() {
 			if msg.String() == "?" || msg.String() == "esc" {
@@ -164,6 +296,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, nil
+		}
+
+		// Clear status message on key press in navigator
+		if m.view == ViewNavigator {
+			m.statusMsg = ""
 		}
 
 		// When navigator is searching, only handle esc/enter at app level
@@ -206,9 +343,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, m.keys.Back):
+			// Don't handle back if dashboard has active overlay or is searching - let dashboard handle esc
+			if m.view == ViewDashboard && (m.dashboard.IsLogsSearching() || m.dashboard.HasActiveOverlay()) {
+				break // Fall through to dashboard update
+			}
 			return m.handleBack()
 
 		case key.Matches(msg, m.keys.Enter):
+			// Don't handle enter if dashboard has active overlay - let dashboard handle it
+			if m.view == ViewDashboard && m.dashboard.HasActiveOverlay() {
+				break // Fall through to dashboard update
+			}
 			return m.handleEnter()
 		}
 	}
@@ -222,6 +367,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.navigator.SetMode(components.ModeResourceType)
 					return m, nil
 				}
+				// Scale action (only for scalable resource types)
+				if key.Matches(msg, m.keys.Scale) && m.navigator.Mode() == components.ModeWorkloads {
+					workload := m.navigator.SelectedWorkload()
+					if workload != nil {
+						rt := m.navigator.ResourceType()
+						if rt == k8s.ResourceDeployments || rt == k8s.ResourceStatefulSets {
+							items := components.ScaleActions(
+								m.k8sClient.Namespace(),
+								workload.Name,
+								string(rt),
+								workload.Replicas,
+							)
+							m.workloadActionMenu.Show("Scale "+workload.Name, items)
+							return m, nil
+						}
+					}
+				}
+				// Restart action
+				if key.Matches(msg, m.keys.Restart) && m.navigator.Mode() == components.ModeWorkloads {
+					workload := m.navigator.SelectedWorkload()
+					if workload != nil {
+						rt := m.navigator.ResourceType()
+						if rt == k8s.ResourceDeployments || rt == k8s.ResourceStatefulSets || rt == k8s.ResourceDaemonSets {
+							m.confirmDialog.Show(
+								"Restart "+string(rt),
+								"Are you sure you want to restart '"+workload.Name+"'?",
+								"restart",
+								workload,
+							)
+							return m, nil
+						}
+					}
+				}
 			}
 		}
 		m.navigator, cmd = m.navigator.Update(msg)
@@ -230,6 +408,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ViewDashboard:
 		m.dashboard, cmd = m.dashboard.Update(msg)
 		cmds = append(cmds, cmd)
+
+		// Check if log state changed and needs refresh
+		if m.pod != nil {
+			currentShowPrevious := m.dashboard.LogsShowPrevious()
+			currentContainer := m.dashboard.LogsSelectedContainer()
+
+			if currentShowPrevious != m.lastShowPrevious || currentContainer != m.lastLogContainer {
+				m.lastShowPrevious = currentShowPrevious
+				m.lastLogContainer = currentContainer
+				cmds = append(cmds, m.loadLogsForState(m.pod, currentContainer, currentShowPrevious))
+			}
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -246,11 +436,16 @@ func (m Model) View() string {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, loadingMsg)
 	}
 
-	// Build footer
+	// Build footer with optional status message
 	m.statusBar.SetContext(m.k8sClient.Context())
 	m.statusBar.SetNamespace(m.k8sClient.Namespace())
 	m.statusBar.SetResource(string(m.navigator.ResourceType()))
-	footer := m.statusBar.View() + "\n" + m.help.ShortHelp() + "  " + styles.Credit()
+	footerLine := m.statusBar.View()
+	if m.statusMsg != "" {
+		statusStyle := lipgloss.NewStyle().Foreground(styles.Success).Bold(true)
+		footerLine = footerLine + "  " + statusStyle.Render(m.statusMsg)
+	}
+	footer := footerLine + "\n" + m.help.ShortHelp() + "  " + styles.Credit()
 	footerHeight := 2
 
 	// Calculate content height (full height minus footer)
@@ -262,6 +457,32 @@ func (m Model) View() string {
 		content = m.navigator.View()
 	case ViewDashboard:
 		content = m.dashboard.View()
+	}
+
+	// Render confirm dialog as overlay (highest priority)
+	if m.confirmDialog.IsVisible() {
+		return lipgloss.Place(
+			m.width,
+			m.height,
+			lipgloss.Center,
+			lipgloss.Center,
+			m.confirmDialog.View(),
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceForeground(styles.Background),
+		)
+	}
+
+	// Render workload action menu as overlay
+	if m.workloadActionMenu.IsVisible() {
+		return lipgloss.Place(
+			m.width,
+			m.height,
+			lipgloss.Center,
+			lipgloss.Center,
+			m.workloadActionMenu.View(),
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceForeground(styles.Background),
+		)
 	}
 
 	if m.help.IsVisible() {
@@ -459,6 +680,42 @@ func (m *Model) loadDashboardData(pod *k8s.PodInfo) tea.Cmd {
 	}
 }
 
+func (m *Model) loadLogsForState(pod *k8s.PodInfo, container string, previous bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		var logs []k8s.LogLine
+		var err error
+
+		if previous {
+			// Get previous logs for specific container or first container
+			targetContainer := container
+			if targetContainer == "" && len(pod.Containers) > 0 {
+				targetContainer = pod.Containers[0].Name
+			}
+			if targetContainer != "" {
+				logs, err = k8s.GetPreviousLogs(ctx, m.k8sClient.Clientset(), pod.Namespace, pod.Name, targetContainer, 200)
+			}
+		} else if container != "" {
+			// Get logs for specific container
+			opts := k8s.LogOptions{
+				Container:  container,
+				TailLines:  200,
+				Timestamps: true,
+			}
+			logs, err = k8s.GetPodLogs(ctx, m.k8sClient.Clientset(), pod.Namespace, pod.Name, opts)
+		} else {
+			// Get all container logs
+			logs, err = k8s.GetAllContainerLogs(ctx, m.k8sClient.Clientset(), pod.Namespace, pod.Name, 200)
+		}
+
+		if err != nil {
+			return logsUpdatedMsg{logs: []k8s.LogLine{{Content: "Error fetching logs: " + err.Error(), IsError: true}}}
+		}
+
+		return logsUpdatedMsg{logs: logs}
+	}
+}
+
 func (m *Model) tickCmd() tea.Cmd {
 	return tea.Tick(time.Duration(m.config.RefreshInterval)*time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
@@ -467,4 +724,45 @@ func (m *Model) tickCmd() tea.Cmd {
 
 func (m *Model) saveConfig() {
 	_ = m.config.Save()
+}
+
+func (m *Model) deletePod(namespace, podName string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		err := m.k8sClient.DeletePod(ctx, namespace, podName)
+		return podDeletedMsg{
+			namespace: namespace,
+			podName:   podName,
+			err:       err,
+		}
+	}
+}
+
+func (m *Model) scaleWorkload(workload *k8s.WorkloadInfo, replicas int32) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		err := m.k8sClient.ScaleWorkload(ctx, workload.Namespace, workload.Name, workload.Type, replicas)
+		return workloadActionMsg{
+			action:       "scale",
+			workloadName: workload.Name,
+			namespace:    workload.Namespace,
+			resourceType: workload.Type,
+			replicas:     replicas,
+			err:          err,
+		}
+	}
+}
+
+func (m *Model) restartWorkload(workload *k8s.WorkloadInfo) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		err := m.k8sClient.RestartWorkload(ctx, workload.Namespace, workload.Name, workload.Type)
+		return workloadActionMsg{
+			action:       "restart",
+			workloadName: workload.Name,
+			namespace:    workload.Namespace,
+			resourceType: workload.Type,
+			err:          err,
+		}
+	}
 }
