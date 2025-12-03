@@ -5,6 +5,8 @@ A fast, keyboard-driven TUI for debugging Kubernetes workloads.
 ![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 
+![k9sight demo](demo.gif)
+
 ## Features
 
 - Browse deployments, statefulsets, daemonsets, jobs, cronjobs
