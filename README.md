@@ -17,12 +17,17 @@ A fast, keyboard-driven TUI for debugging Kubernetes workloads.
 
 ## Install
 
+**Homebrew:**
+```bash
+brew install doganarif/tap/k9sight
+```
+
+**Go:**
 ```bash
 go install github.com/doganarif/k9sight/cmd/k9sight@latest
 ```
 
-Or build from source:
-
+**From source:**
 ```bash
 git clone https://github.com/doganarif/k9sight.git
 cd k9sight
